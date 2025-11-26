@@ -300,7 +300,7 @@ ui <- dashboardPage(
           box(
             title = "EMA Data (Human, Authorised – newest first)", width = 12,
             solidHeader = TRUE, status = "primary",
-            p("EMA JSON feed filtered to human authorised medicines and sorted by best available approval/decision date (newest first)."),
+            p("EMA feed filtered to human authorised medicines and sorted by best available approval/decision date (newest first)."),
             textInput("ema_search_term", "Search by product or active substance (optional):", ""),
             actionButton("ema_refresh", "Refresh", icon = icon("sync"))
           )
@@ -326,8 +326,8 @@ ui <- dashboardPage(
           width = 12, title = "About this dashboard", status = "info", solidHeader = TRUE,
           p("This dashboard pulls live regulatory data from:"),
           tags$ul(
-            tags$li("FDA openFDA Drugs@FDA API (drug/drugsfda endpoint) for US approvals and submissions."),
-            tags$li("EMA medicines JSON report for centrally authorised medicines in the EU.")
+            tags$li("FDA for US approvals and submissions."),
+            tags$li("EMA medicines for centrally authorised medicines in the EU.")
           )
         )
       )
