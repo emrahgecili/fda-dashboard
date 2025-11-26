@@ -1,5 +1,5 @@
 #############################
-## app.R – FDA Approvals Dashboard (No Email)
+## app.R – FDA + EMA Approvals Dashboard
 #############################
 
 library(shiny)
@@ -15,17 +15,22 @@ library(tidyr)      # for expand_grid
 library(openxlsx)   # Excel export
 library(rmarkdown)  # PDF export
 library(knitr)      # tables for PDF/HTML
+library(tibble)
 
-# ==============
-# 0. Global helpers & config
-# ==============
+#############################
+## 0. Global helpers & config
+#############################
 
+## ---------- FDA (openFDA) ----------
 OPENFDA_BASE <- "https://api.fda.gov/drug/drugsfda.json"
-
-# OPTIONAL: if you get throttled, request an API key from openFDA and set it here
 OPENFDA_API_KEY <- Sys.getenv("OPENFDA_API_KEY", unset = NA_character_)
 
-# Helper to call openFDA drugsfda endpoint safely
+## ---------- EMA ----------
+EMA_MEDICINES_JSON_URL <- "https://www.ema.europa.eu/en/documents/report/medicines-output-medicines_json-report_en.json"
+
+`%||%` <- function(a, b) if (is.null(a)) b else a
+
+# ---------- openFDA fetch ----------
 fetch_drugsfda <- function(search = "", sort = NULL, limit = 100, skip = 0) {
   query <- list(
     search = search,
@@ -46,7 +51,7 @@ fetch_drugsfda <- function(search = "", sort = NULL, limit = 100, skip = 0) {
   parsed
 }
 
-# Flatten drugsfda JSON into a tibble of (application, product, submission) rows
+# ---------- Flatten drugsfda JSON ----------
 flatten_drugsfda <- function(parsed) {
   results <- parsed$results
   if (is.null(results)) return(tibble())
@@ -61,7 +66,6 @@ flatten_drugsfda <- function(parsed) {
     if (length(products) == 0)    products    <- list(list())
     if (length(submissions) == 0) submissions <- list(list())
     
-    # All combinations product x submission per application
     expand_grid(
       product    = seq_along(products),
       submission = seq_along(submissions)
@@ -90,9 +94,7 @@ flatten_drugsfda <- function(parsed) {
   })
 }
 
-`%||%` <- function(a, b) if (is.null(a)) b else a
-
-# Utility: filter by date range safely
+# ---------- Date range helper ----------
 filter_by_date_range <- function(df, date_col, from, to) {
   if (is.null(df) || nrow(df) == 0) return(df)
   if (is.null(from) && is.null(to)) return(df)
@@ -102,13 +104,13 @@ filter_by_date_range <- function(df, date_col, from, to) {
   df
 }
 
-# Helper to create a simple PDF report for a data.frame
+# ---------- Simple PDF report ----------
 create_pdf_report <- function(df, title, file) {
   if (nrow(df) == 0) {
     tmp_rmd <- tempfile(fileext = ".Rmd")
     writeLines(c(
       "---",
-      "title: \"FDA Report\"",
+      "title: \"FDA/EMA Report\"",
       "output: pdf_document",
       "---",
       "",
@@ -148,20 +150,44 @@ create_pdf_report <- function(df, title, file) {
   )
 }
 
-# ==============
-# 1. UI
-# ==============
+# ---------- EMA loader ----------
+load_ema_data_from_json <- function() {
+  resp <- httr::GET(EMA_MEDICINES_JSON_URL)
+  if (httr::status_code(resp) != 200) {
+    warning("EMA JSON request failed: ", httr::content(resp, "text"))
+    return(tibble())
+  }
+  
+  txt <- httr::content(resp, as = "text", encoding = "UTF-8")
+  parsed <- jsonlite::fromJSON(txt, flatten = TRUE)
+  as_tibble(parsed)
+}
+
+# Robust date parser for EMA (multiple formats)
+parse_ema_date <- function(x) {
+  suppressWarnings(
+    lubridate::parse_date_time(
+      x,
+      orders = c("Ymd", "Y-m-d", "dmy", "d/m/Y", "d.m.Y")
+    )
+  )
+}
+
+#############################
+## 1. UI
+#############################
 
 ui <- dashboardPage(
   skin = "blue",
-  dashboardHeader(title = "Gassem FDA Approvals Dashboard"),
+  dashboardHeader(title = "FDA + EMA Approvals Dashboard"),
   dashboardSidebar(
     sidebarMenu(
-      menuItem("New Drug Approvals",      tabName = "new_drugs",  icon = icon("capsules")),
-      menuItem("New Generic Approvals",   tabName = "generics",   icon = icon("copy")),
-      menuItem("Recent Submissions",      tabName = "submissions",icon = icon("file-signature")),
+      menuItem("New Drug Approvals (FDA)", tabName = "new_drugs",  icon = icon("capsules")),
+      menuItem("New Generic Approvals",    tabName = "generics",   icon = icon("copy")),
+      menuItem("Recent Submissions (FDA)", tabName = "submissions",icon = icon("file-signature")),
+      menuItem("EMA Approvals (EU)",       tabName = "ema",        icon = icon("globe-europe")),
       hr(),
-      menuItem("About / Help",            tabName = "about",      icon = icon("info-circle"))
+      menuItem("About / Help",             tabName = "about",      icon = icon("info-circle"))
     )
   ),
   dashboardBody(
@@ -174,7 +200,7 @@ ui <- dashboardPage(
             title = "Filters", width = 12, solidHeader = TRUE, status = "primary",
             dateRangeInput(
               "nd_date_range",
-              "Approval status date range",
+              "Approval status date range (FDA):",
               start = Sys.Date() - 30,
               end   = Sys.Date()
             ),
@@ -184,8 +210,8 @@ ui <- dashboardPage(
         ),
         fluidRow(
           box(
-            title = "Recently Approved New Drugs (NDA/BLA)",
-            width = 12, status = "primary", solidHeader = TRUE,
+            title = "Recently Approved New Drugs (NDA/BLA)", width = 12,
+            status = "primary", solidHeader = TRUE,
             div(
               style = "margin-bottom: 10px;",
               downloadButton("download_nd_excel", "Download Excel"),
@@ -204,18 +230,18 @@ ui <- dashboardPage(
             title = "Filters", width = 12, solidHeader = TRUE, status = "primary",
             dateRangeInput(
               "gen_date_range",
-              "Approval status date range",
+              "Approval status date range (FDA):",
               start = Sys.Date() - 30,
               end   = Sys.Date()
             ),
-            textInput("gen_brand_ref", "Reference brand (optional):", ""),
+            textInput("gen_brand_ref", "Reference brand / keyword (optional):", ""),
             actionButton("gen_refresh", "Refresh", icon = icon("sync"))
           )
         ),
         fluidRow(
           box(
-            title = "Recently Approved Generics (ANDA)",
-            width = 12, status = "primary", solidHeader = TRUE,
+            title = "Recently Approved Generics (ANDA)", width = 12,
+            status = "primary", solidHeader = TRUE,
             div(
               style = "margin-bottom: 10px;",
               downloadButton("download_gen_excel", "Download Excel"),
@@ -226,7 +252,7 @@ ui <- dashboardPage(
         )
       ),
       
-      # ---- Tab 3: Recent Submissions (Applications Filed) ----
+      # ---- Tab 3: Recent Submissions (FDA) ----
       tabItem(
         tabName = "submissions",
         fluidRow(
@@ -234,7 +260,7 @@ ui <- dashboardPage(
             title = "Filters", width = 12, solidHeader = TRUE, status = "primary",
             dateRangeInput(
               "sub_date_range",
-              "Submission status date range",
+              "Submission status date range (FDA):",
               start = Sys.Date() - 30,
               end   = Sys.Date()
             ),
@@ -255,8 +281,8 @@ ui <- dashboardPage(
         ),
         fluidRow(
           box(
-            title = "Recent Submissions / Applications",
-            width = 12, status = "primary", solidHeader = TRUE,
+            title = "Recent Submissions / Applications (FDA)", width = 12,
+            status = "primary", solidHeader = TRUE,
             div(
               style = "margin-bottom: 10px;",
               downloadButton("download_sub_excel", "Download Excel"),
@@ -267,35 +293,55 @@ ui <- dashboardPage(
         )
       ),
       
+      # ---- Tab 4: EMA Approvals ----
+      tabItem(
+        tabName = "ema",
+        fluidRow(
+          box(
+            title = "EMA Data (Human, Authorised – newest first)", width = 12,
+            solidHeader = TRUE, status = "primary",
+            p("EMA JSON feed filtered to human authorised medicines and sorted by best available approval/decision date (newest first)."),
+            textInput("ema_search_term", "Search by product or active substance (optional):", ""),
+            actionButton("ema_refresh", "Refresh", icon = icon("sync"))
+          )
+        ),
+        fluidRow(
+          box(
+            title = "EMA Centrally Authorised Human Medicines (EU)", width = 12,
+            status = "primary", solidHeader = TRUE,
+            div(
+              style = "margin-bottom: 10px;",
+              downloadButton("download_ema_excel", "Download Excel"),
+              downloadButton("download_ema_pdf",   "Download PDF")
+            ),
+            DTOutput("ema_table")
+          )
+        )
+      ),
+      
       # ---- About tab ----
       tabItem(
         tabName = "about",
         box(
           width = 12, title = "About this dashboard", status = "info", solidHeader = TRUE,
-          p("This dashboard uses :) ",
-            "to retrieve information on drug applications, products, and submissions."),
+          p("This dashboard pulls live regulatory data from:"),
           tags$ul(
-            tags$li("New Drug Approvals tab shows only submissions with status = 'AP' ",
-                    "for NDA/BLA-like application numbers."),
-            tags$li("New Generic Approvals tab shows only submissions with status = 'AP' ",
-                    "for ANDA (generic) applications."),
-            tags$li("Recent Submissions tab shows all recent submissions, ",
-                    "filterable by date, application prefix and status.")
-          ),
-          p("Tables are de-duplicated using dplyr::distinct() after selecting key columns.")
+            tags$li("FDA openFDA Drugs@FDA API (drug/drugsfda endpoint) for US approvals and submissions."),
+            tags$li("EMA medicines JSON report for centrally authorised medicines in the EU.")
+          )
         )
       )
     )
   )
 )
 
-# ==============
-# 2. Server
-# ==============
+#############################
+## 2. SERVER
+#############################
 
 server <- function(input, output, session) {
   
-  # 2.1 New Drug Approvals (NDA/BLA) – only approved (submission_status == "AP")
+  ## ---- 2.1 New Drug Approvals (NDA/BLA, FDA) ----
   nd_data <- eventReactive(input$nd_refresh, {
     parsed <- fetch_drugsfda(
       search = 'submissions.submission_status:"AP"',
@@ -305,9 +351,9 @@ server <- function(input, output, session) {
     df <- flatten_drugsfda(parsed)
     
     df <- df |>
-      dplyr::filter(
-        submission_status == "AP",   # ensure it's truly approved
-        str_starts(application_number, "NDA") | 
+      filter(
+        submission_status == "AP",
+        str_starts(application_number, "NDA") |
           str_starts(application_number, "BLA")
       )
     
@@ -318,7 +364,7 @@ server <- function(input, output, session) {
     if (nzchar(term)) {
       term_low <- tolower(term)
       df <- df |>
-        dplyr::filter(
+        filter(
           str_detect(tolower(brand_name), term_low) |
             str_detect(tolower(generic_name), term_low)
         )
@@ -327,19 +373,19 @@ server <- function(input, output, session) {
     df |>
       arrange(desc(submission_status_date)) |>
       select(
-        Approval_Date   = submission_status_date,
-        Application     = application_number,
-        Brand           = brand_name,
-        Generic         = generic_name,
-        Dosage_Form     = dosage_form,
-        Route           = route,
-        Sponsor         = sponsor_name,
-        Submission_Type = submission_type,
+        Approval_Date     = submission_status_date,
+        Application       = application_number,
+        Brand             = brand_name,
+        Generic           = generic_name,
+        Dosage_Form       = dosage_form,
+        Route             = route,
+        Sponsor           = sponsor_name,
+        Submission_Type   = submission_type,
         Submission_Status = submission_status,
-        Class_Code      = submission_class_code,
-        Class_Desc      = submission_class_desc
+        Class_Code        = submission_class_code,
+        Class_Desc        = submission_class_desc
       ) |>
-      distinct()   # remove exact duplicate rows
+      distinct()
   }, ignoreNULL = FALSE)
   
   output$nd_table <- renderDT({
@@ -352,20 +398,20 @@ server <- function(input, output, session) {
   })
   
   output$download_nd_excel <- downloadHandler(
-    filename = function() paste0("new_drug_approvals_", Sys.Date(), ".xlsx"),
+    filename = function() paste0("new_drug_approvals_fda_", Sys.Date(), ".xlsx"),
     content = function(file) {
       openxlsx::write.xlsx(nd_data(), file)
     }
   )
   
   output$download_nd_pdf <- downloadHandler(
-    filename = function() paste0("new_drug_approvals_", Sys.Date(), ".pdf"),
+    filename = function() paste0("new_drug_approvals_fda_", Sys.Date(), ".pdf"),
     content = function(file) {
-      create_pdf_report(nd_data(), "New Drug Approvals (NDA/BLA)", file)
+      create_pdf_report(nd_data(), "FDA New Drug Approvals (NDA/BLA)", file)
     }
   )
   
-  # 2.2 New Generic Approvals (ANDA) – only approved (submission_status == "AP")
+  ## ---- 2.2 New Generic Approvals (ANDA, FDA) ----
   gen_data <- eventReactive(input$gen_refresh, {
     parsed <- fetch_drugsfda(
       search = 'submissions.submission_status:"AP"',
@@ -375,7 +421,7 @@ server <- function(input, output, session) {
     df <- flatten_drugsfda(parsed)
     
     df <- df |>
-      dplyr::filter(
+      filter(
         submission_status == "AP",
         str_starts(application_number, "ANDA")
       )
@@ -387,7 +433,7 @@ server <- function(input, output, session) {
     if (nzchar(term)) {
       term_low <- tolower(term)
       df <- df |>
-        dplyr::filter(
+        filter(
           str_detect(tolower(brand_name), term_low) |
             str_detect(tolower(submission_class_desc), term_low)
         )
@@ -420,20 +466,20 @@ server <- function(input, output, session) {
   })
   
   output$download_gen_excel <- downloadHandler(
-    filename = function() paste0("generic_approvals_", Sys.Date(), ".xlsx"),
+    filename = function() paste0("generic_approvals_fda_", Sys.Date(), ".xlsx"),
     content = function(file) {
       openxlsx::write.xlsx(gen_data(), file)
     }
   )
   
   output$download_gen_pdf <- downloadHandler(
-    filename = function() paste0("generic_approvals_", Sys.Date(), ".pdf"),
+    filename = function() paste0("generic_approvals_fda_", Sys.Date(), ".pdf"),
     content = function(file) {
-      create_pdf_report(gen_data(), "Generic Drug Approvals (ANDA)", file)
+      create_pdf_report(gen_data(), "FDA Generic Drug Approvals (ANDA)", file)
     }
   )
   
-  # 2.3 Recent Submissions / Applications Filed – keep all statuses
+  ## ---- 2.3 Recent Submissions (FDA, all statuses) ----
   sub_data <- eventReactive(input$sub_refresh, {
     parsed <- fetch_drugsfda(
       search = "",
@@ -447,7 +493,7 @@ server <- function(input, output, session) {
     
     if (input$sub_app_type != "All") {
       df <- df |>
-        dplyr::filter(str_starts(application_number, input$sub_app_type))
+        filter(str_starts(application_number, input$sub_app_type))
     }
     
     if (input$sub_status != "All") {
@@ -457,7 +503,7 @@ server <- function(input, output, session) {
           "NA",
           submission_status
         )) |>
-        dplyr::filter(submission_status_clean == input$sub_status)
+        filter(submission_status_clean == input$sub_status)
     }
     
     df |>
@@ -497,6 +543,89 @@ server <- function(input, output, session) {
     filename = function() paste0("fda_submissions_", Sys.Date(), ".pdf"),
     content = function(file) {
       create_pdf_report(sub_data(), "FDA Recent Submissions / Applications", file)
+    }
+  )
+  
+  ## ---- 2.4 EMA Approvals (EU – human, authorised, newest first) ----
+  ema_data <- eventReactive(input$ema_refresh, {
+    df_raw <- load_ema_data_from_json()
+    if (nrow(df_raw) == 0) return(tibble())
+    
+    Approval_Date_raw <- coalesce(
+      parse_ema_date(df_raw$marketing_authorisation_date),
+      parse_ema_date(df_raw$european_commission_decision_date),
+      parse_ema_date(df_raw$opinion_adopted_date),
+      parse_ema_date(df_raw$first_published_date)
+    )
+    
+    df <- tibble(
+      Approval_Date     = as.Date(Approval_Date_raw),
+      Category          = df_raw$category,
+      Product           = df_raw$name_of_medicine,
+      Active_Substance  = df_raw$active_substance,
+      MAH               = df_raw$marketing_authorisation_developer_applicant_holder,
+      Status            = df_raw$medicine_status,
+      EMA_Number        = df_raw$ema_product_number,
+      URL               = df_raw$medicine_url
+    )
+    
+    # Filter to human + authorised
+    if (!all(is.na(df$Category))) {
+      df <- df |> filter(grepl("human", Category, ignore.case = TRUE))
+    }
+    if (!all(is.na(df$Status))) {
+      df <- df |> filter(grepl("author", Status, ignore.case = TRUE))
+    }
+    
+    # Search filter
+    term <- tolower(trimws(input$ema_search_term))
+    if (nzchar(term)) {
+      df <- df |>
+        filter(
+          grepl(term, tolower(Product)) |
+            grepl(term, tolower(Active_Substance))
+        )
+    }
+    
+    df |>
+      arrange(desc(Approval_Date)) |>
+      select(
+        Approval_Date,
+        Product,
+        Active_Substance,
+        MAH,
+        Status,
+        EMA_Number,
+        URL
+      ) |>
+      distinct()
+  }, ignoreNULL = FALSE)
+  
+  output$ema_table <- renderDT({
+    datatable(
+      ema_data(),
+      options = list(
+        pageLength = 25,
+        scrollX    = TRUE,
+        order      = list(list(0, "desc"))   # default sort: Approval_Date desc
+      ),
+      filter   = "top",
+      rownames = FALSE,
+      escape   = FALSE
+    )
+  })
+  
+  output$download_ema_excel <- downloadHandler(
+    filename = function() paste0("ema_approvals_", Sys.Date(), ".xlsx"),
+    content = function(file) {
+      openxlsx::write.xlsx(ema_data(), file)
+    }
+  )
+  
+  output$download_ema_pdf <- downloadHandler(
+    filename = function() paste0("ema_approvals_", Sys.Date(), ".pdf"),
+    content = function(file) {
+      create_pdf_report(ema_data(), "EMA Human Authorised Medicines (Newest First)", file)
     }
   )
 }
