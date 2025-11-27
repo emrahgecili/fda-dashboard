@@ -1,5 +1,5 @@
 #############################
-## app.R – FDA + EMA Approvals Dashboard
+## app.R – FDA + EMA + Canada + UK Dashboard
 #############################
 
 library(shiny)
@@ -27,6 +27,9 @@ OPENFDA_API_KEY <- Sys.getenv("OPENFDA_API_KEY", unset = NA_character_)
 
 ## ---------- EMA ----------
 EMA_MEDICINES_JSON_URL <- "https://www.ema.europa.eu/en/documents/report/medicines-output-medicines_json-report_en.json"
+
+## ---------- Canada (Health Canada NOC API) ----------
+CAN_NOC_BASE <- "https://health-products.canada.ca/api/notice-of-compliance"
 
 `%||%` <- function(a, b) if (is.null(a)) b else a
 
@@ -110,7 +113,7 @@ create_pdf_report <- function(df, title, file) {
     tmp_rmd <- tempfile(fileext = ".Rmd")
     writeLines(c(
       "---",
-      "title: \"FDA/EMA Report\"",
+      "title: \"Regulatory Report\"",
       "output: pdf_document",
       "---",
       "",
@@ -173,21 +176,48 @@ parse_ema_date <- function(x) {
   )
 }
 
+# ---------- Canada NOC loaders ----------
+load_can_noc_main <- function() {
+  url <- paste0(CAN_NOC_BASE, "/noticeofcompliancemain/?lang=en&type=json")
+  resp <- httr::GET(url)
+  if (httr::status_code(resp) != 200) {
+    warning("Canada NOC main request failed: ", httr::content(resp, "text"))
+    return(tibble())
+  }
+  txt <- httr::content(resp, as = "text", encoding = "UTF-8")
+  parsed <- jsonlite::fromJSON(txt, flatten = TRUE)
+  as_tibble(parsed)
+}
+
+load_can_noc_drug <- function() {
+  url <- paste0(CAN_NOC_BASE, "/drugproduct/?lang=en&type=json")
+  resp <- httr::GET(url)
+  if (httr::status_code(resp) != 200) {
+    warning("Canada NOC drugproduct request failed: ", httr::content(resp, "text"))
+    return(tibble())
+  }
+  txt <- httr::content(resp, as = "text", encoding = "UTF-8")
+  parsed <- jsonlite::fromJSON(txt, flatten = TRUE)
+  as_tibble(parsed)
+}
+
 #############################
 ## 1. UI
 #############################
 
 ui <- dashboardPage(
   skin = "blue",
-  dashboardHeader(title = "FDA + EMA Approvals Dashboard"),
+  dashboardHeader(title = "Regulatory Approvals Dashboard"),
   dashboardSidebar(
     sidebarMenu(
-      menuItem("New Drug Approvals (FDA)", tabName = "new_drugs",  icon = icon("capsules")),
-      menuItem("New Generic Approvals",    tabName = "generics",   icon = icon("copy")),
-      menuItem("Recent Submissions (FDA)", tabName = "submissions",icon = icon("file-signature")),
-      menuItem("EMA Approvals (EU)",       tabName = "ema",        icon = icon("globe-europe")),
+      menuItem("New Drug Approvals (FDA)",    tabName = "new_drugs",  icon = icon("capsules")),
+      menuItem("New Generic Approvals (FDA)", tabName = "generics",   icon = icon("copy")),
+      menuItem("Recent Submissions (FDA)",    tabName = "submissions", icon = icon("file-signature")),
+      menuItem("EMA Approvals (EU)",          tabName = "ema",        icon = icon("globe-europe")),
+      menuItem("Canada Approvals (NOC)",      tabName = "canada",     icon = icon("flag-canada")),
+      menuItem("UK (MHRA)",                   tabName = "uk",         icon = icon("flag-uk")),
       hr(),
-      menuItem("About / Help",             tabName = "about",      icon = icon("info-circle"))
+      menuItem("About / Help",                tabName = "about",      icon = icon("info-circle"))
     )
   ),
   dashboardBody(
@@ -300,7 +330,7 @@ ui <- dashboardPage(
           box(
             title = "EMA Data (Human, Authorised – newest first)", width = 12,
             solidHeader = TRUE, status = "primary",
-            p("EMA feed filtered to human authorised medicines and sorted by best available approval/decision date (newest first)."),
+            p("EMA JSON feed filtered to human authorised medicines and sorted by best available approval/decision date (newest first)."),
             textInput("ema_search_term", "Search by product or active substance (optional):", ""),
             actionButton("ema_refresh", "Refresh", icon = icon("sync"))
           )
@@ -319,6 +349,84 @@ ui <- dashboardPage(
         )
       ),
       
+      # ---- Tab 5: Canada Approvals (NOC) ----
+      tabItem(
+        tabName = "canada",
+        fluidRow(
+          box(
+            title = "Canada NOC Approvals (newest first)", width = 12,
+            solidHeader = TRUE, status = "primary",
+            p("Health Canada Notice of Compliance (NOC) data, joined with brand name and DIN, sorted by NOC date (newest first)."),
+            dateRangeInput(
+              "can_date_range",
+              "NOC date range (Canada):",
+              start = Sys.Date() - 90,
+              end   = Sys.Date()
+            ),
+            textInput(
+              "can_search_term",
+              "Search by brand, manufacturer, or therapeutic class (optional):",
+              ""
+            ),
+            actionButton("can_refresh", "Refresh", icon = icon("sync"))
+          )
+        ),
+        fluidRow(
+          box(
+            title = "Health Canada – Notices of Compliance", width = 12,
+            status = "primary", solidHeader = TRUE,
+            div(
+              style = "margin-bottom: 10px;",
+              downloadButton("download_can_excel", "Download Excel"),
+              downloadButton("download_can_pdf",   "Download PDF")
+            ),
+            DTOutput("can_table")
+          )
+        )
+      ),
+      
+      # ---- Tab 6: UK (MHRA – Link Hub) ----
+      tabItem(
+        tabName = "uk",
+        fluidRow(
+          box(
+            title = "UK Marketing Authorisations (MHRA)", width = 12,
+            solidHeader = TRUE, status = "primary",
+            HTML("
+              <p>
+                The MHRA publishes new UK marketing authorisations as PDF lists on GOV.UK.
+                There is currently no official JSON/CSV API for these data, so this dashboard
+                links you directly to the most up-to-date official sources.
+              </p>
+            "),
+            tags$h4("Latest UK marketing authorisations"),
+            tags$ul(
+              tags$li(
+                tags$a(
+                  href = 'https://www.gov.uk/government/publications/marketing-authorisations-granted-in-2025',
+                  target = '_blank',
+                  'Marketing authorisations granted in 2025 (PDF lists, updated regularly)'
+                )
+              ),
+              tags$li(
+                tags$a(
+                  href = 'https://www.gov.uk/government/collections/marketing-authorisations-lists-of-granted-licences',
+                  target = '_blank',
+                  'All years – marketing authorisations: lists of granted licences'
+                )
+              )
+            ),
+            HTML("
+              <p>
+                To review UK approvals, open the 2025 page and select the most recent PDF
+                (for example, “Marketing authorisations granted 1 to 14 November 2025”).
+                You can download the PDF and, if needed, process it offline in R or another tool.
+              </p>
+            ")
+          )
+        )
+      ),
+      
       # ---- About tab ----
       tabItem(
         tabName = "about",
@@ -327,7 +435,9 @@ ui <- dashboardPage(
           p("This dashboard pulls live regulatory data from:"),
           tags$ul(
             tags$li("FDA for US approvals and submissions."),
-            tags$li("EMA medicines for centrally authorised medicines in the EU.")
+            tags$li("EMA medicines report for centrally authorised medicines in the EU."),
+            tags$li("Health Canada Notice of Compliance (NOC) for Canadian approvals."),
+            tags$li("MHRA GOV.UK pages for UK marketing authorisations (PDF lists linked directly).")
           )
         )
       )
@@ -626,6 +736,84 @@ server <- function(input, output, session) {
     filename = function() paste0("ema_approvals_", Sys.Date(), ".pdf"),
     content = function(file) {
       create_pdf_report(ema_data(), "EMA Human Authorised Medicines (Newest First)", file)
+    }
+  )
+  
+  ## ---- 2.5 Canada NOC Approvals ----
+  can_data <- eventReactive(input$can_refresh, {
+    main <- load_can_noc_main()
+    drug <- load_can_noc_drug()
+    if (nrow(main) == 0) return(tibble())
+    
+    df <- main |>
+      left_join(drug, by = "noc_number")
+    
+    df <- df |>
+      mutate(
+        noc_date_parsed = suppressWarnings(ymd(noc_date))
+      )
+    
+    dr <- input$can_date_range
+    if (!is.null(dr) && length(dr) == 2) {
+      df <- df |>
+        filter(
+          is.na(noc_date_parsed) |
+            (noc_date_parsed >= dr[1] & noc_date_parsed <= dr[2])
+        )
+    }
+    
+    term <- tolower(trimws(input$can_search_term))
+    if (nzchar(term)) {
+      df <- df |>
+        filter(
+          grepl(term, tolower(noc_br_brandname %||% "")) |
+            grepl(term, tolower(noc_manufacturer_name %||% "")) |
+            grepl(term, tolower(noc_therapeutic_class %||% ""))
+        )
+    }
+    
+    df |>
+      arrange(desc(noc_date_parsed)) |>
+      select(
+        NOC_Date          = noc_date_parsed,
+        NOC_Number        = noc_number,
+        Brand             = noc_br_brandname,
+        DIN               = noc_br_din,
+        Manufacturer      = noc_manufacturer_name,
+        Submission_Type   = noc_on_submission_type,
+        Product_Type      = noc_product_type,
+        Therapeutic_Class = noc_therapeutic_class,
+        Active_Status     = noc_active_status,
+        Conditions_Flag   = noc_status_with_conditions,
+        Last_Update       = noc_last_update_date
+      ) |>
+      distinct()
+  }, ignoreNULL = FALSE)
+  
+  output$can_table <- renderDT({
+    datatable(
+      can_data(),
+      options = list(
+        pageLength = 25,
+        scrollX    = TRUE,
+        order      = list(list(0, "desc"))  # default sort NOC_Date desc
+      ),
+      filter   = "top",
+      rownames = FALSE
+    )
+  })
+  
+  output$download_can_excel <- downloadHandler(
+    filename = function() paste0("canada_noc_approvals_", Sys.Date(), ".xlsx"),
+    content = function(file) {
+      openxlsx::write.xlsx(can_data(), file)
+    }
+  )
+  
+  output$download_can_pdf <- downloadHandler(
+    filename = function() paste0("canada_noc_approvals_", Sys.Date(), ".pdf"),
+    content = function(file) {
+      create_pdf_report(can_data(), "Health Canada NOC Approvals", file)
     }
   )
 }
